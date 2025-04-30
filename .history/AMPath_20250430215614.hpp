@@ -443,8 +443,7 @@ namespace AMPath
         std::regex regex1("^[A-Za-z]:[/\\\\]?");
         std::regex regex2("^/");
         std::regex regex3("^\\\\\\\\");
-        std::regex regex4("^~[/\\\\]");
-        return std::regex_search(path, regex1) || std::regex_search(path, regex2) || std::regex_search(path, regex3) || std::regex_search(path, regex4);
+        return std::regex_search(path, regex1) || std::regex_search(path, regex2) || std::regex_search(path, regex3);
     }
 
     std::vector<std::string> split(std::string path)
@@ -493,69 +492,6 @@ namespace AMPath
         }
 
         return result;
-    }
-
-    std::vector<std::string> splitre(std::string path)
-    {
-        path = path.erase(0, path.find_first_not_of(" "));
-        path = path.erase(path.find_last_not_of(" ") + 1);
-        if (path.size() < 3)
-        {
-            return {path};
-        }
-        std::string head = path.substr(0, 2);
-        std::vector<std::string> outs;
-        std::string tmp;
-        bool in_sign = false;
-
-        for (auto c : path)
-        {
-            if (c == '<')
-            {
-                in_sign = true;
-                tmp += c;
-                continue;
-            }
-
-            if (c == '>')
-            {
-                if (!tmp.empty())
-                {
-                    outs.push_back(tmp);
-                }
-                in_sign = false;
-                continue;
-            }
-
-            if (in_sign)
-            {
-                tmp += c;
-            }
-
-            if (c == '\\' || c == '/')
-            {
-                if (!tmp.empty())
-                {
-                    outs.push_back(tmp);
-                    tmp.clear();
-                }
-            }
-            else
-            {
-                tmp += c;
-            }
-        }
-
-        if (!tmp.empty())
-        {
-            outs.push_back(tmp);
-        }
-        if (head == "\\\\" || head == "//")
-        {
-            outs[0] = head + outs[0];
-        }
-
-        return outs;
     }
 
     template <typename... Args>
@@ -665,7 +601,15 @@ namespace AMPath
 
         if (!is_absolute(path))
         {
-            path = fs::current_path().string() + path;
+            std::string head = path.substr(0, 2);
+            if (head == "~/" || head == "~\\")
+            {
+                path = std::getenv("USERPROFILE") + path.substr(1);
+            }
+            else
+            {
+                path = fs::current_path().string() + path;
+            }
         }
 
         std::vector<std::string> parts = AMPath::split(path);
@@ -675,12 +619,6 @@ namespace AMPath
         }
 
         std::vector<std::string> new_parts;
-        if (new_parts[0] == "~")
-        {
-            new_parts.erase(new_parts.begin());
-            std::vector<std::string> home_parts = AMPath::split(std::getenv("USERPROFILE"));
-            new_parts.insert(new_parts.begin(), home_parts.begin(), home_parts.end());
-        }
         for (const auto &part : parts)
         {
             if (part == ".")
@@ -907,16 +845,7 @@ namespace AMPath
 
     std::tuple<std::vector<std::string>, std::string, bool> preprocess(std::string path, bool use_regex)
     {
-        std::vector<std::string> path_parts_ori;
-        if (use_regex)
-        {
-            path_parts_ori = AMPath::split(path);
-        }
-        else
-        {
-            path_parts_ori = AMPath::splitre(path);
-        }
-
+        auto path_parts_ori = AMPath::split(path);
         std::vector<std::string> path_parts = {};
 
         bool is2star = false;
@@ -955,7 +884,7 @@ namespace AMPath
             auto part = path_parts[i];
             if (use_regex)
             {
-                is_match = path_parts[i].find("*") != std::string::npos || path_parts[0] == "<";
+                is_match = std::regex_search(part, std::regex("[\\*\\?<>\\+]"));
             }
             else
             {
@@ -963,28 +892,14 @@ namespace AMPath
             }
             if (is_match)
             {
-                if (use_regex)
-                {
-                    match_parts.push_back(part.substr(1, part.size() - 1));
-                }
-                else
-                {
-                    match_parts.push_back(part);
-                }
+                match_parts.push_back(part);
                 is_end = true;
             }
             else
             {
                 if (is_end)
                 {
-                    if (use_regex)
-                    {
-                        match_parts.push_back(part.substr(1, part.size() - 1));
-                    }
-                    else
-                    {
-                        match_parts.push_back(part);
-                    }
+                    match_parts.push_back(part);
                 }
                 else
                 {
@@ -1150,6 +1065,7 @@ namespace AMPath
 
     std::variant<std::vector<std::string>, std::pair<std::string, std::string>> find(std::string path, AMPathTools::ENUMS::SearchType type = AMPathTools::ENUMS::SearchType::All, bool use_regex = false, bool silence = false, std::function<void(std::string, std::exception)> callback = nullptr)
     {
+        path = AMPath::realpath(AMPathTools::ShapePath(path), false);
         if (fs::exists(path) && !use_regex)
         {
             return std::vector<std::string>{path};
