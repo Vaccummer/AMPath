@@ -1,4 +1,5 @@
 #pragma once
+#include "AMTools.hpp"
 #include <aclapi.h>
 #include <chrono>
 #include <ctime>
@@ -20,6 +21,7 @@
 namespace AMPathTools
 {
     namespace fs = std::filesystem;
+    using CB = std::shared_ptr<std::function<void(std::string, std::string, std::string)>>;
     constexpr char *exc1 = "am1sp2exg6";
     constexpr char *exc2 = "amtmpexc5";
     constexpr char *exc3 = "atmasdapxch";
@@ -53,46 +55,6 @@ namespace AMPathTools
             File = 1,
             Directory = 2
         };
-    }
-
-    std::string ShapePath(std::string path, std::string sep = "")
-    {
-        path = path.erase(0, path.find_first_not_of(" "));
-        path = path.erase(path.find_last_not_of(" ") + 1);
-        if (path.size() < 2)
-            return path;
-        std::string head = path.substr(0, 2);
-        if (sep.empty())
-        {
-            int slash_count = 0;
-            int anti_slash_count = 0;
-
-            for (auto c : path)
-            {
-                switch (c)
-                {
-                case '/':
-                    slash_count++;
-                    break;
-                case '\\':
-                    anti_slash_count++;
-                    break;
-                }
-            }
-
-            if (slash_count < anti_slash_count)
-            {
-                sep = "\\";
-            }
-            else
-            {
-                sep = "/";
-            }
-        }
-
-        std::regex slash_pt("[\\\\/]+");
-        path = head + std::regex_replace(path.substr(2), slash_pt, sep);
-        return path;
     }
 
     std::string regex_escape(const std::string &input)
@@ -169,7 +131,18 @@ namespace AMPathTools
         return result;
     };
 
-    std::wstring AMwstr(const std::string &str)
+    std::string AMstr(const wchar_t *wstr)
+    {
+        int codePage = GetACP();
+        int len = WideCharToMultiByte(codePage, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
+        if (len <= 0)
+            return "";
+        std::string result(len - 1, 0);
+        WideCharToMultiByte(codePage, 0, wstr, -1, &result[0], len, nullptr, nullptr);
+        return result;
+    }
+
+    std::wstring AMstr(const std::string &str)
     {
         int codePage = CP_ACP;
         if (is_valid_utf8(str))
@@ -183,6 +156,21 @@ namespace AMPathTools
         MultiByteToWideChar(codePage, 0, str.c_str(), -1, &result[0], len);
         return result;
     };
+
+    std::wstring AMstr(const char *str)
+    {
+        int codePage = CP_ACP;
+        if (is_valid_utf8(str))
+        {
+            codePage = CP_UTF8;
+        }
+        int len = MultiByteToWideChar(CP_ACP, 0, str, -1, nullptr, 0);
+        if (len <= 0)
+            return L"";
+        std::wstring result(len - 1, 0);
+        MultiByteToWideChar(codePage, 0, str, -1, &result[0], len);
+        return result;
+    }
 
     namespace WinAPI
     {
@@ -275,22 +263,34 @@ namespace AMPathTools
         }
     }
 
-    bool _match(std::string name, std::string pattern, bool use_regex)
+    bool _match(const std::string &name, const std::string &pattern_f, const bool &use_regex)
     {
-        if (!use_regex)
+        std::string pattern = pattern_f;
+        if (!use_regex || pattern.front() != '<')
         {
             pattern = std::regex_replace(pattern, std::regex("\\*"), std::string(exc1));
             pattern = regex_escape(pattern);
             pattern = std::regex_replace(pattern, std::regex(exc1), ".*");
-            return std::regex_search(name, std::regex(pattern));
+            std::wstring p_w = AMPathTools::AMstr(pattern);
+
+            std::wstring n_w = AMPathTools::AMstr(name);
+            try
+            {
+                return std::regex_search(n_w, std::wregex(p_w));
+            }
+            catch (std::exception e)
+            {
+                return false;
+            }
         }
         else
         {
-            std::regex pattern_f(pattern);
-            // 检测是否为合法的正则表达式
+            pattern = pattern.substr(1);
+            std::wregex pattern_f(AMPathTools::AMstr(pattern));
             try
             {
-                return std::regex_search(name, pattern_f);
+                bool result = std::regex_search(AMPathTools::AMstr(name), pattern_f);
+                return result;
             }
             catch (const std::exception &e)
             {
@@ -298,11 +298,44 @@ namespace AMPathTools
             }
         }
     }
+
+    std::variant<bool, std::string> isPatternsValid(const std::vector<std::string> &patterns)
+    {
+        std::regex pattern_f;
+        for (auto pattern : patterns)
+        {
+            if (pattern.empty())
+            {
+                return "Recive an empty pattern";
+            }
+            if (pattern[0] != '<')
+            {
+                continue;
+            }
+            if (pattern.size() == 1)
+            {
+                return "Recive a single <";
+            };
+
+            try
+            {
+                pattern_f = std::regex(pattern.substr(1));
+                std::regex_search("abc", pattern_f);
+            }
+            catch (std::exception e)
+            {
+                std::string msg = fmt::format("Pattern \"{}\" parsing failed: {}", pattern, e.what());
+                return msg;
+            }
+        }
+        return true;
+    }
 }
 
 namespace AMPath
 {
     namespace fs = std::filesystem;
+    using CB = std::shared_ptr<std::function<void(std::string, std::string, std::string)>>;
     constexpr char *AMERROR = "ERROR";
     constexpr char *AMWARNING = "WARNING";
 
@@ -403,9 +436,7 @@ namespace AMPath
         return mode_int;
     }
 
-    std::string MergeModeStr(std::string base_mode_str, std::string new_mode_str);
-
-    std::string MergeModeStr(std::string base_mode_str, std::string new_mode_str)
+    std::string MergeModeStr(const std::string &base_mode_str, const std::string &new_mode_str)
     {
         std::string pattern_f = "^[r?\\-][w?\\-][x?\\-][r?\\-][w?\\-][x?\\-][r?\\-][w?\\-][x?\\-]$";
         std::regex pattern(pattern_f);
@@ -440,36 +471,98 @@ namespace AMPath
 
     bool is_absolute(const std::string &path)
     {
-        std::regex regex1("^[A-Za-z]:[/\\\\]?");
-        std::regex regex2("^/");
-        std::regex regex3("^\\\\\\\\");
-        return std::regex_search(path, regex1) || std::regex_search(path, regex2) || std::regex_search(path, regex3);
+        std::regex merged_regex("^(?:[A-Za-z]:[/\\\\]?|/|\\\\\\\\|~[\\\\/])");
+        return std::regex_search(path, merged_regex);
     }
 
-    std::vector<std::string> split(std::string path)
+    std::string Strip(std::string path)
     {
-        path = AMPathTools::ShapePath(path);
+        const std::string trim_chars = " \t\n\r\"'";
+
+        size_t start = path.find_first_not_of(trim_chars);
+
+        if (start == std::string::npos || start > path.size() - 2)
+        {
+            return "";
+        }
+
+        size_t end = path.find_last_not_of(trim_chars);
+        return path.substr(start, end - start + 1);
+    }
+
+    void VStrip(std::string &path)
+    {
+        const std::string trim_chars = " \t\n\r\"'";
+
+        size_t start = path.find_first_not_of(trim_chars);
+        if (start == std::string::npos)
+        {
+            path = "";
+        }
+
+        size_t end = path.find_last_not_of(trim_chars);
+        path = path.substr(start, end - start + 1);
+    }
+
+    std::string GetPathSep(const std::string &path)
+    {
+        int slash_count = 0;
+        int anti_slash_count = 0;
+        for (auto &c : path)
+        {
+            if (c == '/')
+            {
+                slash_count++;
+            }
+            else if (c == '\\')
+            {
+                anti_slash_count++;
+            }
+        }
+        return slash_count > anti_slash_count ? "/" : "\\";
+    }
+
+    std::string HomePath()
+    {
+        return std::getenv("HOMEPROFILE");
+    }
+
+    std::string ShapePath(std::string path, std::string sep = "")
+    {
+        path = AMPath::Strip(path);
+        if (path.size() < 2)
+            return path;
+        if (sep.empty())
+        {
+            sep = AMPath::GetPathSep(path);
+        }
+        std::string head = path.substr(0, 2);
+
+        std::regex slash_pt("[\\\\/]+");
+        path = head + std::regex_replace(path.substr(2), slash_pt, sep);
+        return path;
+    }
+
+    std::vector<std::string> split(std::string &path_f)
+    {
+
+        std::string path = AMPath::ShapePath(path_f);
+
         if (path.size() < 2)
         {
             return {path};
         }
         std::vector<std::string> result{};
+        std::string head = path.substr(0, 2);
+        if (head == "//" || head == "\\\\")
+        {
+            path = path.substr(2);
+        }
+        else
+        {
+            head.clear();
+        }
 
-        if (path.substr(0, 2) == "//")
-        {
-            result.push_back("//");
-            path = path.substr(2);
-        }
-        else if (path.front() == '/')
-        {
-            result.push_back("/");
-            path = path.substr(1);
-        }
-        else if (path.substr(0, 2) == "\\\\")
-        {
-            result.push_back("\\\\");
-            path = path.substr(2);
-        }
         std::string cur = "";
         for (auto c : path)
         {
@@ -490,14 +583,70 @@ namespace AMPath
         {
             result.push_back(cur);
         }
+        if (!head.empty())
+        {
+            result[0] = head + result[0];
+        }
 
         return result;
+    }
+
+    std::vector<std::string> resplit(std::string path, char front_esc, char back_esc, std::string head = "")
+    {
+        if (path.size() < 3)
+        {
+            return {path};
+        }
+        std::vector<std::string> parts{};
+        std::string tmp_str = "";
+        bool in_brackets = false;
+        std::string bracket_str = "";
+        for (auto &sig : path)
+        {
+            if (in_brackets)
+            {
+                if (sig == back_esc)
+                {
+                    in_brackets = false;
+                    if (!bracket_str.empty())
+                    {
+                        parts.push_back(head + bracket_str);
+                        bracket_str.clear();
+                    }
+                }
+                else
+                {
+                    bracket_str += sig;
+                }
+            }
+            else
+            {
+                if (sig == front_esc)
+                {
+                    in_brackets = true;
+                }
+                else if (sig == '/' || sig == '\\')
+                {
+                    if (!tmp_str.empty())
+                    {
+                        parts.push_back(tmp_str);
+                        tmp_str.clear();
+                    }
+                }
+                else
+                {
+                    tmp_str += sig;
+                }
+            }
+        }
+        return parts;
     }
 
     template <typename... Args>
     std::string join(Args &&...args)
     {
         std::vector<std::string> segments;
+        std::string ori_str;
         fs::path combined;
 
         auto process_arg = [&](auto &&arg)
@@ -508,31 +657,53 @@ namespace AMPath
                 if (!arg.empty())
                 {
                     segments.push_back(arg.string());
+                    ori_str += arg.string();
                 }
             }
-            else if constexpr (std::is_same_v<T, std::string>)
+            else if constexpr (std::is_same_v<T, std::string> || std::is_same_v<T, const std::string>)
             {
                 if (!arg.empty())
                 {
                     segments.push_back(arg);
+                    ori_str += arg;
                 }
             }
-            else if constexpr (std::is_same_v<T, std::vector<std::string>>)
+            else if constexpr (std::is_same_v<T, std::vector<std::string>> || std::is_same_v<T, const std::vector<std::string>>)
             {
                 for (auto &seg : arg)
                 {
                     if (!seg.empty())
                     {
                         segments.push_back(seg);
+                        ori_str += seg;
                     }
                 }
             }
-            else if constexpr (std::is_same_v<T, const char *>)
+            else if constexpr (std::is_same_v<T, std::wstring> || std::is_same_v<T, const std::wstring>)
+            {
+                std::string s = AMPathTools::AMstr(arg);
+                if (!s.empty())
+                {
+                    segments.push_back(s);
+                    ori_str += s;
+                }
+            }
+            else if constexpr (std::is_same_v<T, const char *> || std::is_same_v<T, char *>)
             {
                 std::string s = std::string(arg);
                 if (!s.empty())
                 {
                     segments.push_back(s);
+                    ori_str += s;
+                }
+            }
+            else if constexpr (std::is_same_v<T, const wchar_t *> || std::is_same_v<T, wchar_t *>)
+            {
+                std::string s = AMPathTools::AMstr(arg);
+                if (!s.empty())
+                {
+                    segments.push_back(s);
+                    ori_str += s;
                 }
             }
         };
@@ -547,69 +718,28 @@ namespace AMPath
         }
 
         std::string result;
+        std::string sep = GetPathSep(ori_str);
         for (auto seg : segments)
         {
-            result += seg + "/";
+            result += seg + sep;
         }
         result.pop_back();
-        int slash_count = 1 - result.size();
-        int anti_slash_count = 0;
-
-        for (auto c : result)
-        {
-            switch (c)
-            {
-            case '/':
-                slash_count++;
-                break;
-            case '\\':
-                anti_slash_count++;
-                break;
-            }
-        }
-
-        std::string sep;
-        if (slash_count < anti_slash_count)
-        {
-            sep = "\\";
-        }
-        else
-        {
-            sep = "/";
-        }
-
-        return AMPathTools::ShapePath(result, sep);
+        return result;
     }
 
     std::string realpath(std::string path, bool force_absolute = false, std::string sep = "")
     {
+
         if (path.size() < 2)
         {
             return path;
         }
 
-        path = AMPathTools::ShapePath(path, sep);
-        std::string new_sep;
-        if (path.find("\\") != std::string::npos)
-        {
-            new_sep = "\\";
-        }
-        else
-        {
-            new_sep = "/";
-        }
+        std::string new_sep = sep.empty() ? GetPathSep(path) : sep;
 
-        if (!is_absolute(path))
+        if (!is_absolute(path) && !force_absolute)
         {
-            std::string head = path.substr(0, 2);
-            if (head == "~/" || head == "~\\")
-            {
-                path = std::getenv("USERPROFILE") + path.substr(1);
-            }
-            else
-            {
-                path = fs::current_path().string() + path;
-            }
+            path = fs::current_path().string() + path;
         }
 
         std::vector<std::string> parts = AMPath::split(path);
@@ -618,14 +748,26 @@ namespace AMPath
             return "";
         }
 
-        std::vector<std::string> new_parts;
-        for (const auto &part : parts)
+        std::vector<std::string> new_parts{};
+
+        if (parts.front() == "~")
         {
-            if (part == ".")
+            std::string hm = HomePath();
+            for (const auto seg : AMPath::split(hm))
+            {
+                new_parts.push_back(seg);
+            }
+            parts.erase(parts.begin());
+        }
+
+        std::string tmp_part;
+        for (auto tmp_part : parts)
+        {
+            if (tmp_part == ".")
             {
                 continue;
             }
-            else if (part == "..")
+            else if (tmp_part == "..")
             {
                 if (!new_parts.empty())
                 {
@@ -634,15 +776,17 @@ namespace AMPath
             }
             else
             {
-                new_parts.push_back(part);
+                new_parts.push_back(tmp_part);
             }
         }
+
         std::string result;
-        for (const auto &part : new_parts)
+        for (const auto part : new_parts)
         {
             result += part + new_sep;
         }
         result.pop_back();
+
         return result;
     }
 
@@ -680,7 +824,7 @@ namespace AMPath
     {
         PathInfo info;
         fs::path p(path);
-        std::wstring wpath = AMPathTools::AMwstr(path);
+        std::wstring wpath = AMPathTools::AMstr(path);
         info.name = p.filename().string();
         info.path = realpath(path);
         info.dir = p.parent_path().string();
@@ -743,7 +887,7 @@ namespace AMPath
             }
         }
 
-        if (AMPathTools::WinAPI::is_readonly(AMPathTools::AMwstr(path)))
+        if (AMPathTools::WinAPI::is_readonly(AMPathTools::AMstr(path)))
         {
             info.mode_int = 0333;
             info.mode_str = "r-xr-xr-x";
@@ -845,20 +989,38 @@ namespace AMPath
 
     std::tuple<std::vector<std::string>, std::string, bool> preprocess(std::string path, bool use_regex)
     {
-        auto path_parts_ori = AMPath::split(path);
+
+        VStrip(path);
+
+        std::string sep = GetPathSep(path);
+
+        if (!is_absolute(path))
+        {
+            path = HomePath() + sep + path;
+        }
+
+        std::vector<std::string> ori_parts;
+        if (use_regex)
+        {
+            ori_parts = AMPath::resplit(path, '<', '>', "<");
+        }
+        else
+        {
+            ori_parts = AMPath::split(path);
+        }
+
         std::vector<std::string> path_parts = {};
 
         bool is2star = false;
         bool is_recursive = false;
-        for (int i = 0; i < path_parts_ori.size(); i++)
+        for (int i = 0; i < ori_parts.size(); i++)
         {
-            auto part = path_parts_ori[i];
+            auto part = ori_parts[i];
             if (part == "**")
             {
                 is_recursive = true;
                 if (is2star)
                 {
-                    path_parts.erase(path_parts.begin() + i);
                     continue;
                 }
                 else
@@ -876,20 +1038,28 @@ namespace AMPath
 
         std::vector<std::string> match_parts;
         std::vector<std::string> root_parts;
+
         int num_i = 0;
         bool is_match;
         bool is_end = false;
         for (int i = 0; i < path_parts.size(); i++)
         {
             auto part = path_parts[i];
+            if (is_end)
+            {
+                match_parts.push_back(part);
+                continue;
+            }
+
             if (use_regex)
             {
-                is_match = std::regex_search(part, std::regex("[\\*\\?<>\\+]"));
+                is_match = part[0] == '<' || part.find("*") != std::string::npos;
             }
             else
             {
                 is_match = part.find("*") != std::string::npos;
             }
+
             if (is_match)
             {
                 match_parts.push_back(part);
@@ -897,21 +1067,14 @@ namespace AMPath
             }
             else
             {
-                if (is_end)
-                {
-                    match_parts.push_back(part);
-                }
-                else
-                {
-                    root_parts.push_back(part);
-                }
+                root_parts.push_back(part);
             }
         }
 
-        return std::make_tuple(match_parts, AMPath::join(root_parts), is_recursive);
+        return std::make_tuple(match_parts, AMPath::realpath(AMPath::join(root_parts), false, "\\"), is_recursive);
     }
 
-    void search(std::vector<std::string> &results, fs::path root, std::string name, std::vector<std::string> remains, AMPathTools::ENUMS::SearchType type, bool use_regex, bool silence, std::function<void(std::string, std::exception)> callback)
+    void search(std::vector<std::string> &results, fs::path root, std::string name, std::vector<std::string> remains, AMPathTools::ENUMS::SearchType type, bool use_regex, bool silence, CB callback)
     {
         if (!remains.empty())
         {
@@ -931,6 +1094,7 @@ namespace AMPath
                     cur_name = entry.path().filename().string();
                     cur_path = AMPath::join(root, cur_name);
                     is_dir = fs::is_directory(cur_path);
+                    is_match = AMPathTools::_match(cur_name, name, use_regex);
 
                     if (name == "**")
                     {
@@ -966,7 +1130,6 @@ namespace AMPath
                     }
                     continue;
                 }
-                is_match = AMPathTools::_match(cur_name, name, use_regex);
 
                 if (is_match && is_dir)
                 {
@@ -976,13 +1139,11 @@ namespace AMPath
                     search(results, cur_path, new_name, new_remains, type, use_regex, silence, callback);
                 }
             }
-
             catch (const std::exception e)
             {
-                std::cout << "error: " << e.what() << std::endl;
                 if (!silence && callback)
                 {
-                    callback(AMERROR, e);
+                    (*callback)(root.string(), "IterdirFailed", e.what());
                 }
             }
         }
@@ -1057,15 +1218,16 @@ namespace AMPath
                 std::cout << "error: " << e.what() << std::endl;
                 if (!silence && callback)
                 {
-                    callback(AMERROR, e);
+                    (*callback)(root.string(), "IterdirFailed", e.what());
                 }
             }
         }
     }
 
-    std::variant<std::vector<std::string>, std::pair<std::string, std::string>> find(std::string path, AMPathTools::ENUMS::SearchType type = AMPathTools::ENUMS::SearchType::All, bool use_regex = false, bool silence = false, std::function<void(std::string, std::exception)> callback = nullptr)
+    std::vector<std::string> find(const std::string &path_f, AMPathTools::ENUMS::SearchType type = AMPathTools::ENUMS::SearchType::All, bool use_regex = false, bool silence = false, CB callback = nullptr)
     {
-        path = AMPath::realpath(AMPathTools::ShapePath(path), false);
+
+        std::string path = path_f;
         if (fs::exists(path) && !use_regex)
         {
             return std::vector<std::string>{path};
@@ -1075,10 +1237,15 @@ namespace AMPath
         auto root_path = std::get<1>(pre_result);
         bool is_recursive = std::get<2>(pre_result);
         std::vector<std::string> results;
+        amprint("root: ", root_path);
 
         if (root_path.empty())
         {
-            return std::make_pair(AMERROR, fmt::format("Can't parse the root of the path: {}", path));
+            if (callback)
+            {
+                (*callback)(path_f, "FailToParsingRoot", "Parsed Root is Empty");
+            }
+            return {};
         }
 
         if (!fs::exists(root_path))
@@ -1090,9 +1257,24 @@ namespace AMPath
         {
             return std::vector<std::string>{root_path};
         }
+
+        if (use_regex)
+        {
+            auto reg_check = AMPathTools::isPatternsValid(match_parts);
+            if (std::holds_alternative<std::string>(reg_check))
+            {
+                if (callback)
+                {
+                    (*callback)(path_f, "RegexSytanxError", std::get<std::string>(reg_check));
+                }
+                return {};
+            }
+        }
+
         std::string name_first = match_parts.front();
         match_parts.erase(match_parts.begin());
-        if (root_path.back() != '\\' && root_path.back() != '/')
+
+        if (root_path.find("\\") == std::string::npos && root_path.find("/") == std::string::npos)
         {
             root_path = root_path + "\\";
         }
